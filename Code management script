@@ -1,0 +1,156 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Thu Oct 15 13:16:35 2026
+
+@author: admin
+"""
+import matplotlib.pyplot as plt
+import serial
+import time
+import numpy as np
+import csv
+from datetime import datetime
+from scipy.interpolate import PchipInterpolator
+
+
+
+serialPort = serial.Serial()
+serialPort.baudrate = 1000000
+serialPort.parity = serial.PARITY_NONE
+serialPort.bytesize = serial.EIGHTBITS
+serialPort.stopbits = serial.STOPBITS_ONE
+serialPort.port = 'COM6'
+
+nb_essais = 10  #nombre d'essais 
+
+for essai in range(1, nb_essais + 1):  # boucle sur les essais (1 à 10)
+
+    input(f"Essai {essai}/{nb_essais} : appuie sur Entrée pour démarrer")  # AJOUT
+
+    serialPort.open() 
+    time.sleep(2) 
+    # laisser le temps à l'Arduino de redémarrer avant d'envoyer 'r' 
+
+
+    serialPort.write('r'.encode(encoding="ascii")) 
+    serialPort.flush()
+    
+
+
+    times = []
+    # tableau vide qui va accumuler chaque mesure de temps reçue (en secondes)
+
+    values = []  # tableau pour les valeurs calibrées du potentiomètre
+
+
+    startTime = time.time()
+    duration = 10
+
+
+    while time.time() - startTime < duration:
+        if serialPort.in_waiting > 0:
+            ligne = serialPort.readline().decode(encoding="ascii", errors="ignore").strip()
+            if ligne:
+                try:
+                    t_us, val = ligne.split(',')
+
+                    elapsed_s = int(t_us) / 1_000_000
+                    # convertit les microsecondes en secondes ici
+
+                    times.append(elapsed_s)
+                    # ajoute cette valeurà la fin du tableau times
+
+                    values.append(int(val))  #ajoute la valeur calibrée du potentiomètre
+                except ValueError:
+                    pass
+
+
+    serialPort.write('s'.encode(encoding="ascii"))
+    serialPort.flush()
+    # flush() force l'envoi immédiat de la commande 's' (déclenche le reset)
+
+
+    serialPort.close()
+
+
+
+    print(f"{len(times)} valeurs reçues")
+    print(times[:10])
+    print(values[:10])  #  affiche aussi les 10 premières valeurs du capteur
+
+
+    t = np.array(times)
+    v = np.array(values)
+
+    t_fin = np.linspace(t.min(), t.max(), 500)
+    plt.figure()  #nouvelle figure à chaque essai (sinon les courbes se superposent)
+    plt.plot(t_fin, PchipInterpolator(t, v)(t_fin))
+    plt.xlabel("Temps (s)")
+    plt.ylabel("Valeur calibrée")
+    plt.title(f"Essai {essai}")
+    plt.savefig(f"graphique_essai{essai:02d}.png")  #enregistre au lieu d'afficher
+    plt.close()  # libère la figure 
+
+
+
+    filename = f"mesures_ARDUINO_essai{essai:02d}.csv"  # numéro d'essai dans le nom
+
+    with open(filename, "w", newline="", encoding="utf-8") as f:  #filename au lieu du nom fixe
+        writer = csv.writer(f, delimiter=";")
+        writer.writerow(["temps_s", "valeur_calibree"])
+        writer.writerows(zip(times, values))
+        
+    print(f"Données enregistrées dans {filename}")  #corrige le NameError
+    
+    ARDUINO :
+
+bool startLoop = false;
+unsigned long startTime;
+
+const int PIN_POT = A0;
+
+
+const long POT_RAW_MIN = 0;     // valeur brute min 
+const long POT_RAW_MAX = 1023;  // valeur brute max 
+const long POT_CAL_MIN = 0;     // borne basse de l'unité calibrée 
+const long POT_CAL_MAX = 100;   // borne haute de l'unité calibrée 
+
+char buffer[32];
+
+void setup() {
+  pinMode(LED_BUILTIN, OUTPUT);
+  digitalWrite(LED_BUILTIN, LOW);
+  Serial.begin(1000000, SERIAL_8N1);
+  analogReadResolution(10);  // 0..1023
+
+  while (startLoop == false) {
+    if (Serial.available() > 0) {
+      int value = Serial.read();
+      if (value == 114) startLoop = true; // 'r'
+    }
+  }
+
+  startTime = micros();
+}
+
+void loop() {
+  digitalWrite(LED_BUILTIN, HIGH);
+
+  unsigned long elapsed = micros() - startTime;
+  int raw = analogRead(PIN_POT);
+  long calibre = map(raw, POT_RAW_MIN, POT_RAW_MAX, POT_CAL_MIN, POT_CAL_MAX);
+
+  sprintf(buffer, "%lu,%ld", elapsed, calibre);  // "temps_us,valeur_calibrée"
+  Serial.println(buffer);
+  delay(100);
+
+  // Reset dès réception du caractère 's'
+  if (Serial.available() > 0) {
+    int value = Serial.read();
+    if (value == 115) { // 's'
+      NVIC_SystemReset();
+    }
+  }
+}
+
+
