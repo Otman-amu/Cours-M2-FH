@@ -1,0 +1,148 @@
+import tkinter as tk                      
+from tkinter import messagebox            
+import matplotlib
+matplotlib.use("Agg")                     
+import matplotlib.pyplot as plt
+import serial
+import time
+import numpy as np
+import csv
+from scipy.interpolate import PchipInterpolator
+
+arret = False   
+
+
+def lancer_acquisition():    # Le script de base entier est poussé dans une fonction pour tKinker 
+    global arret
+    arret = False
+
+    # --- Lecture des paramètres saisis dans la fenêtre ---
+    try:
+        port = entry_port.get().strip()
+        duration = float(entry_duree.get())
+        nb_essais = int(entry_essais.get())
+        pause = float(entry_pause.get())
+        prefixe = entry_nom.get().strip()
+    except ValueError:
+        messagebox.showerror("Erreur", "Durée, nombre d'essais et pause doivent être des nombres.")
+        return
+    if not port or not prefixe or duration <= 0 or nb_essais <= 0 or pause < 0:
+        messagebox.showerror("Erreur", "Vérifie les paramètres : champs vides ou valeurs négatives.")
+        return
+
+    bouton_lancer.config(state="disabled")
+
+    serialPort = serial.Serial()
+    serialPort.baudrate = 1000000
+    serialPort.parity = serial.PARITY_NONE
+    serialPort.bytesize = serial.EIGHTBITS
+    serialPort.stopbits = serial.STOPBITS_ONE
+    serialPort.port = port                #port saisi dans la fenêtre
+
+    try:
+        for essai in range(1, nb_essais + 1):
+            if arret:
+                break
+
+            # compte à rebours avant l'essai (remplace le sleep(5) / input)
+            fin_pause = time.time() + pause
+            while time.time() < fin_pause and not arret:
+                label_statut.config(text=f"Essai {essai}/{nb_essais} : démarrage dans {fin_pause - time.time():.0f} s")
+                root.update()
+                time.sleep(0.05)
+            if arret:
+                break
+
+            serialPort.open()
+            time.sleep(2)
+            serialPort.write('r'.encode(encoding="ascii"))
+            serialPort.flush()
+
+            times = []
+            values = []
+            startTime = time.time()
+            derniere_maj = 0              # pour ne rafraîchir la fenêtre que 10 fois par seconde
+
+            while time.time() - startTime < duration and not arret:   #  test du bouton Arrêter
+                if time.time() - derniere_maj > 0.1:                  # 
+                    label_statut.config(text=f"Essai {essai}/{nb_essais} : acquisition ({time.time() - startTime:.1f}/{duration:.0f} s)")
+                    root.update()
+                    derniere_maj = time.time()
+                if serialPort.in_waiting > 0:
+                    ligne = serialPort.readline().decode(encoding="ascii", errors="ignore").strip()
+                    if ligne:
+                        try:
+                            t_us, val = ligne.split(',')
+                            elapsed_s = int(t_us) / 1_000_000
+                            times.append(elapsed_s)
+                            values.append(int(val))
+                        except ValueError:
+                            pass
+
+            serialPort.write('s'.encode(encoding="ascii"))
+            serialPort.flush()
+            serialPort.close()
+
+            if len(times) < 2:            
+                messagebox.showwarning("Attention", f"Essai {essai} : pas assez de données reçues.")
+                continue
+
+            t = np.array(times)
+            v = np.array(values)
+            t_fin = np.linspace(t.min(), t.max(), 500)
+            plt.figure()
+            plt.plot(t_fin, PchipInterpolator(t, v)(t_fin))
+            plt.xlabel("Temps (s)")
+            plt.ylabel("Valeur calibrée")
+            plt.title(f"Essai {essai}")
+            plt.savefig(f"{prefixe}_essai{essai:02d}.png")   #préfixe saisi dans la fenêtre
+            plt.close()
+
+            filename = f"{prefixe}_essai{essai:02d}.csv"     
+            with open(filename, "w", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f, delimiter=";")
+                writer.writerow(["temps_s", "valeur_calibree"])
+                writer.writerows(zip(times, values))
+
+        label_statut.config(text="Terminé" if not arret else "Arrêté")
+
+    except serial.SerialException as e:   # port occupé ou mauvais numéro de COM
+        messagebox.showerror("Erreur série", f"Problème avec le port {port} :\n{e}")
+        label_statut.config(text="Erreur")
+    finally:                              
+        if serialPort.is_open:
+            serialPort.close()
+        bouton_lancer.config(state="normal")
+
+
+def arreter():                            
+    global arret
+    arret = True
+
+
+root = tk.Tk()
+root.title("Acquisition Arduino")
+
+tk.Label(root, text="Port série :").grid(row=0, column=0, sticky="e", padx=5, pady=3)
+entry_port = tk.Entry(root); entry_port.insert(0, "COM6"); entry_port.grid(row=0, column=1, padx=5)
+
+tk.Label(root, text="Durée d'un essai (s) :").grid(row=1, column=0, sticky="e", padx=5, pady=3)
+entry_duree = tk.Entry(root); entry_duree.insert(0, "10"); entry_duree.grid(row=1, column=1, padx=5)
+
+tk.Label(root, text="Nombre d'essais :").grid(row=2, column=0, sticky="e", padx=5, pady=3)
+entry_essais = tk.Entry(root); entry_essais.insert(0, "10"); entry_essais.grid(row=2, column=1, padx=5)
+
+tk.Label(root, text="Pause avant chaque essai (s) :").grid(row=3, column=0, sticky="e", padx=5, pady=3)
+entry_pause = tk.Entry(root); entry_pause.insert(0, "5"); entry_pause.grid(row=3, column=1, padx=5)
+
+tk.Label(root, text="Nom des fichiers :").grid(row=4, column=0, sticky="e", padx=5, pady=3)
+entry_nom = tk.Entry(root); entry_nom.insert(0, "mesures_ARDUINO"); entry_nom.grid(row=4, column=1, padx=5)
+
+bouton_lancer = tk.Button(root, text="Lancer", command=lancer_acquisition)
+bouton_lancer.grid(row=5, column=0, pady=8)
+tk.Button(root, text="Arrêter", command=arreter).grid(row=5, column=1, pady=8)
+
+label_statut = tk.Label(root, text="Prêt")
+label_statut.grid(row=6, column=0, columnspan=2, pady=5)
+
+root.mainloop()
